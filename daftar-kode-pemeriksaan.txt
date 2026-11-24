@@ -1,0 +1,938 @@
+﻿
+========== routes\web.php ==========
+<?php
+
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\HomeController;
+use App\Http\Controllers\Admin\AuthController;
+use App\Http\Controllers\Admin\DashboardController;
+use App\Http\Controllers\Admin\ProfileController;
+use App\Http\Controllers\Admin\ContentController;
+use App\Http\Controllers\Admin\MessageController;
+use App\Http\Controllers\Admin\SettingController;
+use App\Http\Controllers\Admin\UserController;
+
+Route::get('/', [HomeController::class, 'index'])->name('home');
+Route::post('/contact', [HomeController::class, 'contact'])->middleware('throttle:5,1')->name('contact.store');
+
+Route::prefix('admin')->name('admin.')->group(function () {
+    Route::get('/login', [AuthController::class, 'showLogin'])->name('login');
+    Route::post('/login', [AuthController::class, 'login'])->name('login.process');
+
+    Route::middleware(['auth', 'admin'])->group(function () {
+        Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
+        Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
+
+        Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
+        Route::put('/profile', [ProfileController::class, 'update'])->name('profile.update');
+
+        Route::get('/messages', [MessageController::class, 'index'])->name('messages.index');
+        Route::get('/messages/{id}', [MessageController::class, 'show'])->name('messages.show');
+        Route::delete('/messages/{id}', [MessageController::class, 'destroy'])->name('messages.destroy');
+
+        Route::get('/settings', [SettingController::class, 'edit'])->name('settings.edit');
+        Route::put('/settings', [SettingController::class, 'update'])->name('settings.update');
+
+        Route::get('/users', [UserController::class, 'index'])->name('users.index');
+        Route::get('/users/create', [UserController::class, 'create'])->name('users.create');
+        Route::post('/users', [UserController::class, 'store'])->name('users.store');
+        Route::get('/users/{id}/edit', [UserController::class, 'edit'])->name('users.edit');
+        Route::put('/users/{id}', [UserController::class, 'update'])->name('users.update');
+        Route::delete('/users/{id}', [UserController::class, 'destroy'])->name('users.destroy');
+
+        Route::get('/content/{module}', [ContentController::class, 'index'])->name('content.index');
+        Route::get('/content/{module}/create', [ContentController::class, 'create'])->name('content.create');
+        Route::post('/content/{module}', [ContentController::class, 'store'])->name('content.store');
+        Route::get('/content/{module}/{id}/edit', [ContentController::class, 'edit'])->name('content.edit');
+        Route::put('/content/{module}/{id}', [ContentController::class, 'update'])->name('content.update');
+        Route::delete('/content/{module}/{id}', [ContentController::class, 'destroy'])->name('content.destroy');
+    });
+});
+
+
+
+========== app\Http\Controllers\Admin\MessageController.php ==========
+<?php
+
+namespace App\Http\Controllers\Admin;
+
+use App\Http\Controllers\Controller;
+use App\Models\Message;
+
+class MessageController extends Controller
+{
+    public function index()
+    {
+        $messages = Message::latest()->paginate(15);
+        return view('admin.messages.index', compact('messages'));
+    }
+
+    public function show($id)
+    {
+        $message = Message::findOrFail($id);
+
+        if (!$message->is_read) {
+            $message->update([
+                'is_read' => true,
+                'read_at' => now(),
+            ]);
+        }
+
+        return view('admin.messages.show', compact('message'));
+    }
+
+    public function destroy($id)
+    {
+        Message::findOrFail($id)->delete();
+        return redirect()->route('admin.messages.index')
+            ->with('success', 'Pesan berhasil dihapus.');
+    }
+}
+
+
+========== app\Http\Controllers\Admin\DashboardController.php ==========
+<?php
+
+namespace App\Http\Controllers\Admin;
+
+use App\Http\Controllers\Controller;
+use App\Models\Certificate;
+use App\Models\Education;
+use App\Models\Experience;
+use App\Models\Message;
+use App\Models\Profile;
+use App\Models\Project;
+use App\Models\Skill;
+
+class DashboardController extends Controller
+{
+    public function index()
+    {
+        return view('admin.dashboard', [
+            'profileCount' => Profile::count(),
+            'educationCount' => Education::count(),
+            'experienceCount' => Experience::count(),
+            'skillCount' => Skill::count(),
+            'certificateCount' => Certificate::count(),
+            'projectCount' => Project::count(),
+            'messageCount' => Message::count(),
+            'unreadMessages' => Message::where('is_read', false)->count(),
+            'recentMessages' => Message::latest()->take(5)->get(),
+        ]);
+    }
+}
+
+
+========== app\Http\Controllers\Admin\ProfileController.php ==========
+<?php
+
+namespace App\Http\Controllers\Admin;
+
+use App\Http\Controllers\Controller;
+use App\Models\Profile;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+
+class ProfileController extends Controller
+{
+    public function edit()
+    {
+        $profile = Profile::first();
+
+        return view('admin.profile.edit', compact('profile'));
+    }
+
+    public function update(Request $request)
+    {
+        $validated = $request->validate([
+            'full_name' => 'required|string|max:255',
+            'headline' => 'nullable|string|max:255',
+            'summary' => 'nullable|string',
+            'email' => 'nullable|email|max:255',
+            'phone' => 'nullable|string|max:30',
+            'location' => 'nullable|string|max:255',
+            'address' => 'nullable|string|max:255',
+            'website' => 'nullable|string|max:255',
+            'photo' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:5120',
+            'resume_file' => 'nullable|file|mimes:pdf|max:10240',
+            'is_published' => 'nullable|boolean',
+        ]);
+
+        $profile = Profile::first() ?? new Profile();
+
+        $oldFiles = [];
+
+        foreach (['photo', 'resume_file'] as $field) {
+            if ($request->hasFile($field)) {
+                $oldFiles[$field] = $profile->$field;
+
+                $folder = $field === 'photo' ? 'profiles' : 'resumes';
+
+                $validated[$field] = $request->file($field)
+                    ->store($folder, 'public');
+            }
+        }
+
+        $validated['is_published'] = $request->boolean('is_published');
+
+        $profile->fill($validated);
+        $profile->save();
+
+        foreach ($oldFiles as $field => $oldPath) {
+            if ($oldPath && $oldPath !== $profile->$field) {
+                Storage::disk('public')->delete($oldPath);
+            }
+        }
+
+        return back()->with('success', 'Profil berhasil diperbarui.');
+    }
+}
+
+
+========== app\Models\Message.php ==========
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Message extends Model
+{
+    protected $fillable = [
+        'name',
+        'email',
+        'subject',
+        'message',
+        'is_read',
+        'read_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'is_read' => 'boolean',
+            'read_at' => 'datetime',
+        ];
+    }
+}
+
+
+========== app\Models\User.php ==========
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+
+class User extends Authenticatable
+{
+    use HasFactory, Notifiable;
+
+    protected $fillable = [
+        'name',
+        'email',
+        'password',
+        'is_admin',
+    ];
+
+    protected $hidden = [
+        'password',
+        'remember_token',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' => 'datetime',
+            'password' => 'hashed',
+            'is_admin' => 'boolean',
+        ];
+    }
+}
+
+
+========== resources\views\admin\messages\index.blade.php ==========
+@extends('admin.layouts.app')
+
+@section('content')
+<div class="max-w-7xl mx-auto">
+    <h1 class="text-2xl font-bold mb-6">Pesan Masuk</h1>
+
+    @if(session('success'))
+        <div class="bg-green-100 text-green-800 p-3 rounded-lg mb-4">{{ session('success') }}</div>
+    @endif
+
+    <div class="bg-white rounded-xl shadow-sm overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="p-4 text-left">Nama</th>
+                    <th class="p-4 text-left">Email</th>
+                    <th class="p-4 text-left">Subjek</th>
+                    <th class="p-4 text-left">Status</th>
+                    <th class="p-4 text-right">Aksi</th>
+                </tr>
+            </thead>
+            <tbody>
+                @forelse($messages as $message)
+                    <tr class="border-t">
+                        <td class="p-4 font-medium">{{ $message->name }}</td>
+                        <td class="p-4">{{ $message->email }}</td>
+                        <td class="p-4">{{ $message->subject ?: '-' }}</td>
+                        <td class="p-4">{{ $message->is_read ? 'Sudah dibaca' : 'Belum dibaca' }}</td>
+                        <td class="p-4 text-right">
+                            <a class="text-blue-600 mr-3" href="{{ route('admin.messages.show', $message->id) }}">Buka</a>
+                            <form class="inline" method="POST" action="{{ route('admin.messages.destroy', $message->id) }}" onsubmit="return confirm('Hapus pesan ini?')">
+                                @csrf @method('DELETE')
+                                <button class="text-red-600">Hapus</button>
+                            </form>
+                        </td>
+                    </tr>
+                @empty
+                    <tr><td colspan="5" class="p-8 text-center text-gray-500">Belum ada pesan masuk.</td></tr>
+                @endforelse
+            </tbody>
+        </table>
+    </div>
+    <div class="mt-5">{{ $messages->links() }}</div>
+</div>
+@endsection
+
+
+========== resources\views\admin\messages\show.blade.php ==========
+@extends('admin.layouts.app')
+
+@section('content')
+<div class="max-w-3xl mx-auto bg-white rounded-xl shadow-sm p-6">
+    <h1 class="text-2xl font-bold mb-6">Detail Pesan</h1>
+    <div class="space-y-4">
+        <div><p class="text-gray-500 text-sm">Nama</p><p class="font-semibold">{{ $message->name }}</p></div>
+        <div><p class="text-gray-500 text-sm">Email</p><p>{{ $message->email }}</p></div>
+        <div><p class="text-gray-500 text-sm">Subjek</p><p>{{ $message->subject ?: '-' }}</p></div>
+        <div><p class="text-gray-500 text-sm">Pesan</p><div class="whitespace-pre-line">{{ $message->message }}</div></div>
+    </div>
+    <div class="mt-6 flex gap-3">
+        <a href="{{ route('admin.messages.index') }}" class="bg-gray-100 px-4 py-2 rounded-lg">Kembali</a>
+        <a href="mailto:{{ $message->email }}" class="bg-blue-600 text-white px-4 py-2 rounded-lg">Balas Email</a>
+    </div>
+</div>
+@endsection
+
+
+========== resources\views\admin\dashboard.blade.php ==========
+@extends('admin.layouts.app')
+
+@section('title', 'Dashboard')
+@section('header', 'Ringkasan Dashboard')
+
+@section('content')
+<div class="max-w-7xl mx-auto space-y-8">
+
+    <!-- HERO -->
+    <section class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-900 p-7 md:p-10 text-white shadow-xl">
+        <div class="absolute -right-16 -top-20 w-72 h-72 rounded-full bg-blue-500/10"></div>
+        <div class="absolute right-20 -bottom-32 w-72 h-72 rounded-full bg-indigo-400/10"></div>
+
+        <div class="relative flex flex-col lg:flex-row lg:items-center justify-between gap-7">
+            <div>
+                <span class="inline-flex items-center gap-2 text-xs font-bold tracking-widest text-blue-200 uppercase">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                    Administrator Panel
+                </span>
+
+                <h1 class="text-3xl md:text-4xl font-bold mt-4">
+                    Selamat datang, {{ auth()->user()->name }}!
+                </h1>
+
+                <p class="text-blue-100 mt-3 max-w-xl leading-relaxed">
+                    Kelola profil, pengalaman, pendidikan, keahlian, sertifikat,
+                    dan seluruh portofolio digital Anda melalui satu dashboard.
+                </p>
+
+                <p class="text-blue-200/70 text-sm mt-5">
+                    {{ now()->translatedFormat('l, d F Y') }}
+                </p>
+            </div>
+
+            <div class="flex flex-wrap gap-3">
+                <a href="{{ route('admin.profile.edit') }}"
+                   class="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-white text-blue-950 font-semibold hover:bg-blue-50 transition">
+                    <i data-lucide="user-round-pen" class="w-4 h-4"></i>
+                    Edit Profil
+                </a>
+
+                <a href="{{ route('home') }}" target="_blank"
+                   class="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white font-semibold hover:bg-white/20 transition">
+                    <i data-lucide="external-link" class="w-4 h-4"></i>
+                    Lihat Website
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- STATISTICS -->
+    <section>
+        <div class="flex flex-wrap items-end justify-between gap-3 mb-5">
+            <div>
+                <h2 class="text-xl font-bold text-slate-900">Statistik Website</h2>
+                <p class="text-sm text-slate-500 mt-1">Ringkasan data yang tersimpan di CV Digital.</p>
+            </div>
+            <span class="text-xs text-slate-400">Data keseluruhan</span>
+        </div>
+
+        @php
+            $stats = [
+                [
+                    'label' => 'Profil',
+                    'value' => $profileCount,
+                    'description' => 'Informasi pribadi',
+                    'icon' => 'user-round',
+                    'color' => 'blue',
+                    'url' => route('admin.profile.edit')
+                ],
+                [
+                    'label' => 'Pendidikan',
+                    'value' => $educationCount,
+                    'description' => 'Riwayat pendidikan',
+                    'icon' => 'graduation-cap',
+                    'color' => 'indigo',
+                    'url' => route('admin.content.index', 'educations')
+                ],
+                [
+                    'label' => 'Pengalaman',
+                    'value' => $experienceCount,
+                    'description' => 'Pengalaman kerja',
+                    'icon' => 'briefcase-business',
+                    'color' => 'violet',
+                    'url' => route('admin.content.index', 'experiences')
+                ],
+                [
+                    'label' => 'Keahlian',
+                    'value' => $skillCount,
+                    'description' => 'Kemampuan profesional',
+                    'icon' => 'brain',
+                    'color' => 'cyan',
+                    'url' => route('admin.content.index', 'skills')
+                ],
+                [
+                    'label' => 'Sertifikat',
+                    'value' => $certificateCount,
+                    'description' => 'Sertifikat kompetensi',
+                    'icon' => 'award',
+                    'color' => 'amber',
+                    'url' => route('admin.content.index', 'certificates')
+                ],
+                [
+                    'label' => 'Portofolio',
+                    'value' => $projectCount,
+                    'description' => 'Karya dan proyek',
+                    'icon' => 'folder-kanban',
+                    'color' => 'emerald',
+                    'url' => route('admin.content.index', 'projects')
+                ],
+                [
+                    'label' => 'Total Pesan',
+                    'value' => $messageCount,
+                    'description' => 'Pesan pengunjung',
+                    'icon' => 'mail',
+                    'color' => 'sky',
+                    'url' => route('admin.messages.index')
+                ],
+                [
+                    'label' => 'Belum Dibaca',
+                    'value' => $unreadMessages,
+                    'description' => 'Perlu ditindaklanjuti',
+                    'icon' => 'mail-open',
+                    'color' => 'rose',
+                    'url' => route('admin.messages.index')
+                ],
+            ];
+        @endphp
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
+            @foreach($stats as $stat)
+                <a href="{{ $stat['url'] }}"
+                   class="group bg-white border border-slate-200 rounded-2xl p-5 shadow-sm hover:shadow-lg hover:-translate-y-1 transition duration-200">
+
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">
+                                {{ $stat['label'] }}
+                            </p>
+
+                            <p class="text-3xl font-bold text-slate-900 mt-3">
+                                {{ $stat['value'] }}
+                            </p>
+                        </div>
+
+                        <div class="w-12 h-12 rounded-2xl flex items-center justify-center
+                            bg-{{ $stat['color'] }}-50 text-{{ $stat['color'] }}-600">
+                            <i data-lucide="{{ $stat['icon'] }}" class="w-6 h-6"></i>
+                        </div>
+                    </div>
+
+                    <div class="flex justify-between items-center mt-5">
+                        <span class="text-xs text-slate-400">{{ $stat['description'] }}</span>
+                        <i data-lucide="arrow-up-right" class="w-4 h-4 text-slate-300 group-hover:text-blue-600 transition"></i>
+                    </div>
+                </a>
+            @endforeach
+        </div>
+    </section>
+
+    <!-- MESSAGES AND QUICK ACCESS -->
+    <section class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+
+        <!-- RECENT MESSAGES -->
+        <div class="xl:col-span-2 bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+
+            <div class="flex items-center justify-between gap-3 p-6 border-b border-slate-100">
+                <div>
+                    <h2 class="font-bold text-lg text-slate-900">Pesan Terbaru</h2>
+                    <p class="text-sm text-slate-500 mt-1">Pesan yang dikirim melalui website.</p>
+                </div>
+
+                <a href="{{ route('admin.messages.index') }}"
+                   class="text-sm font-semibold text-blue-600 hover:text-blue-800">
+                    Lihat Semua →
+                </a>
+            </div>
+
+            <div class="p-4 sm:p-6 space-y-3">
+                @forelse($recentMessages as $message)
+                    <a href="{{ route('admin.messages.show', $message->id) }}"
+                       class="flex items-start gap-4 p-4 rounded-xl border border-slate-100 hover:border-blue-200 hover:bg-blue-50/50 transition">
+
+                        <div class="w-11 h-11 shrink-0 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
+                            {{ strtoupper(substr($message->name, 0, 1)) }}
+                        </div>
+
+                        <div class="flex-1 min-w-0">
+                            <div class="flex flex-wrap justify-between gap-2">
+                                <p class="font-semibold text-slate-800 truncate">
+                                    {{ $message->name }}
+                                </p>
+
+                                @if(!$message->is_read)
+                                    <span class="text-xs font-semibold text-blue-700 bg-blue-100 px-2.5 py-1 rounded-full">
+                                        Belum dibaca
+                                    </span>
+                                @endif
+                            </div>
+
+                            <p class="text-sm text-slate-600 mt-1 truncate">
+                                {{ $message->subject ?: 'Tanpa subjek' }}
+                            </p>
+
+                            <p class="text-xs text-slate-400 mt-2">
+                                {{ $message->created_at?->format('d M Y, H:i') }}
+                            </p>
+                        </div>
+
+                        <i data-lucide="chevron-right" class="w-5 h-5 text-slate-300 shrink-0"></i>
+                    </a>
+                @empty
+                    <div class="text-center py-12">
+                        <div class="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center mx-auto mb-4">
+                            <i data-lucide="mail-open" class="w-7 h-7 text-slate-400"></i>
+                        </div>
+                        <p class="font-semibold text-slate-700">Belum ada pesan</p>
+                        <p class="text-sm text-slate-400 mt-1">Pesan dari pengunjung akan muncul di sini.</p>
+                    </div>
+                @endforelse
+            </div>
+        </div>
+
+        <!-- QUICK ACCESS -->
+        <div class="bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
+            <div class="mb-6">
+                <h2 class="font-bold text-lg text-slate-900">Akses Cepat</h2>
+                <p class="text-sm text-slate-500 mt-1">Menu pengelolaan konten.</p>
+            </div>
+
+            <div class="space-y-2">
+
+                @php
+                    $quickLinks = [
+                        ['Profil Saya', 'user-round', route('admin.profile.edit')],
+                        ['Pendidikan', 'graduation-cap', route('admin.content.index', 'educations')],
+                        ['Pengalaman', 'briefcase-business', route('admin.content.index', 'experiences')],
+                        ['Keahlian', 'brain', route('admin.content.index', 'skills')],
+                        ['Sertifikat', 'award', route('admin.content.index', 'certificates')],
+                        ['Portofolio', 'folder-kanban', route('admin.content.index', 'projects')],
+                        ['Media Sosial', 'share-2', route('admin.content.index', 'social-links')],
+                        ['Pesan Masuk', 'mail', route('admin.messages.index')],
+                        ['Pengaturan Website', 'settings', route('admin.settings.edit')],
+                    ];
+                @endphp
+
+                @foreach($quickLinks as $link)
+                    <a href="{{ $link[2] }}"
+                       class="flex items-center justify-between gap-3 p-3 rounded-xl text-sm text-slate-600 hover:bg-blue-50 hover:text-blue-700 transition">
+
+                        <span class="flex items-center gap-3">
+                            <i data-lucide="{{ $link[1] }}" class="w-5 h-5"></i>
+                            {{ $link[0] }}
+                        </span>
+
+                        <i data-lucide="chevron-right" class="w-4 h-4"></i>
+                    </a>
+                @endforeach
+
+            </div>
+        </div>
+
+    </section>
+
+    <!-- FOOTER INFORMATION -->
+    <section class="rounded-2xl border border-blue-100 bg-blue-50/70 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center">
+                <i data-lucide="shield-check" class="w-5 h-5"></i>
+            </div>
+
+            <div>
+                <p class="font-semibold text-slate-800 text-sm">Panel Administrasi CV Digital</p>
+                <p class="text-xs text-slate-500 mt-1">Kelola dan perbarui informasi profesional Anda.</p>
+            </div>
+        </div>
+
+        <a href="{{ route('admin.settings.edit') }}"
+           class="text-sm font-semibold text-blue-700 hover:text-blue-900">
+            Pengaturan Website →
+        </a>
+    </section>
+
+</div>
+@endsection
+
+
+========== resources\views\admin\profile\edit.blade.php ==========
+@extends('admin.layouts.app')
+
+@section('title', 'Manajemen Profil')
+@section('header', 'Manajemen Profil')
+
+@section('content')
+<div class="max-w-6xl mx-auto space-y-6">
+
+    {{-- HEADER --}}
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-800">Profil Profesional</h1>
+            <p class="text-sm text-gray-500 mt-1">
+                Kelola informasi pribadi dan identitas profesional CV Digital Anda.
+            </p>
+        </div>
+
+        <span class="inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium
+            {{ ($profile?->is_published ?? true) ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600' }}">
+            <span class="w-2 h-2 rounded-full
+                {{ ($profile?->is_published ?? true) ? 'bg-green-500' : 'bg-gray-400' }}"></span>
+            {{ ($profile?->is_published ?? true) ? 'Profil Dipublikasikan' : 'Profil Disembunyikan' }}
+        </span>
+    </div>
+
+    {{-- SUCCESS --}}
+    @if(session('success'))
+        <div class="bg-green-50 border border-green-200 text-green-700 px-5 py-4 rounded-xl flex items-center gap-3">
+            <i data-lucide="check-circle" class="w-5 h-5"></i>
+            <span>{{ session('success') }}</span>
+        </div>
+    @endif
+
+    {{-- ERRORS --}}
+    @if($errors->any())
+        <div class="bg-red-50 border border-red-200 text-red-700 px-5 py-4 rounded-xl">
+            <div class="flex items-center gap-2 font-semibold mb-2">
+                <i data-lucide="alert-circle" class="w-5 h-5"></i>
+                Periksa kembali data berikut:
+            </div>
+            <ul class="list-disc pl-6 text-sm space-y-1">
+                @foreach($errors->all() as $error)
+                    <li>{{ $error }}</li>
+                @endforeach
+            </ul>
+        </div>
+    @endif
+
+    <form method="POST"
+          action="{{ route('admin.profile.update') }}"
+          enctype="multipart/form-data"
+          class="space-y-6">
+
+        @csrf
+        @method('PUT')
+
+        {{-- FOTO DAN IDENTITAS --}}
+        <div class="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+            <div class="p-6 border-b border-gray-100">
+                <h2 class="font-bold text-gray-800">Identitas Profil</h2>
+                <p class="text-sm text-gray-500 mt-1">Informasi utama yang ditampilkan pada CV Digital.</p>
+            </div>
+
+            <div class="p-6 grid grid-cols-1 md:grid-cols-3 gap-8">
+
+                {{-- PHOTO --}}
+                <div class="md:col-span-1">
+                    <label class="block text-sm font-semibold text-gray-700 mb-3">
+                        Foto Profil
+                    </label>
+
+                    <div class="flex flex-col items-center text-center border border-dashed border-gray-300 rounded-2xl p-5 bg-gray-50">
+
+                        @if($profile?->photo)
+                            <img
+                                id="photoPreview"
+                                src="{{ asset('storage/'.$profile->photo) }}"
+                                alt="Foto profil"
+                                class="w-36 h-36 rounded-full object-cover border-4 border-white shadow-md">
+                        @else
+                            <div id="photoPlaceholder"
+                                 class="w-36 h-36 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center">
+                                <i data-lucide="user-round" class="w-16 h-16"></i>
+                            </div>
+
+                            <img id="photoPreview"
+                                 src=""
+                                 alt="Preview foto"
+                                 class="hidden w-36 h-36 rounded-full object-cover border-4 border-white shadow-md">
+                        @endif
+
+                        <label for="photo"
+                               class="mt-5 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium cursor-pointer hover:bg-blue-700">
+                            <i data-lucide="upload" class="w-4 h-4"></i>
+                            Pilih Foto
+                        </label>
+
+                        <input type="file"
+                               name="photo"
+                               id="photo"
+                               accept=".jpg,.jpeg,.png,.webp"
+                               class="hidden">
+
+                        <p class="text-xs text-gray-500 mt-3">
+                            JPG, PNG atau WEBP. Maksimal 5 MB.
+                        </p>
+                    </div>
+                </div>
+
+                {{-- PERSONAL DATA --}}
+                <div class="md:col-span-2 space-y-5">
+
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-700 mb-2">
+                            Nama Lengkap <span class="text-red-500">*</span>
+                        </label>
+                        <input type="text"
+                               name="full_name"
+                               required
+                               value="{{ old('full_name', $profile?->full_name) }}"
+                               placeholder="Masukkan nama lengkap"
+                               class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-700 mb-2">
+                            Profesi / Headline
+                        </label>
+                        <input type="text"
+                               name="headline"
+                               value="{{ old('headline', $profile?->headline) }}"
+                               placeholder="Contoh: Web Developer | UI/UX Designer"
+                               class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-700 mb-2">
+                            Ringkasan Profesional
+                        </label>
+                        <textarea name="summary"
+                                  rows="5"
+                                  placeholder="Ceritakan pengalaman, keahlian, dan tujuan profesional Anda..."
+                                  class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 outline-none">{{ old('summary', $profile?->summary) }}</textarea>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+        {{-- CONTACT --}}
+        <div class="bg-white rounded-2xl border border-gray-100 shadow-sm">
+            <div class="p-6 border-b border-gray-100">
+                <h2 class="font-bold text-gray-800">Informasi Kontak</h2>
+                <p class="text-sm text-gray-500 mt-1">Informasi yang dapat digunakan untuk menghubungi Anda.</p>
+            </div>
+
+            <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-5">
+
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Email</label>
+                    <input type="email"
+                           name="email"
+                           value="{{ old('email', $profile?->email) }}"
+                           placeholder="nama@email.com"
+                           class="w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Nomor Telepon / WhatsApp</label>
+                    <input type="text"
+                           name="phone"
+                           value="{{ old('phone', $profile?->phone) }}"
+                           placeholder="08xxxxxxxxxx"
+                           class="w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Kota / Lokasi</label>
+                    <input type="text"
+                           name="location"
+                           value="{{ old('location', $profile?->location) }}"
+                           placeholder="Contoh: Bandung, Indonesia"
+                           class="w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Website / Portfolio</label>
+                    <input type="url"
+                           name="website"
+                           value="{{ old('website', $profile?->website) }}"
+                           placeholder="https://website.com"
+                           class="w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div class="md:col-span-2">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Alamat Lengkap</label>
+                    <textarea name="address"
+                              rows="2"
+                              placeholder="Masukkan alamat lengkap"
+                              class="w-full border border-gray-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500">{{ old('address', $profile?->address) }}</textarea>
+                </div>
+
+            </div>
+        </div>
+
+        {{-- RESUME --}}
+        <div class="bg-white rounded-2xl border border-gray-100 shadow-sm">
+            <div class="p-6 border-b border-gray-100">
+                <h2 class="font-bold text-gray-800">Dokumen Curriculum Vitae</h2>
+                <p class="text-sm text-gray-500 mt-1">Unggah dokumen CV dalam format PDF.</p>
+            </div>
+
+            <div class="p-6">
+                @if($profile?->resume_file)
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-blue-50 border border-blue-100 rounded-xl mb-5">
+                        <div class="flex items-center gap-3">
+                            <div class="w-12 h-12 bg-red-100 text-red-600 rounded-xl flex items-center justify-center">
+                                <i data-lucide="file-pdf" class="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <p class="font-semibold text-gray-800">Dokumen CV tersedia</p>
+                                <p class="text-xs text-gray-500">PDF yang tersimpan saat ini</p>
+                            </div>
+                        </div>
+
+                        <a href="{{ asset('storage/'.$profile->resume_file) }}"
+                           target="_blank"
+                           class="inline-flex items-center justify-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-medium text-blue-600 hover:bg-gray-50">
+                            <i data-lucide="external-link" class="w-4 h-4"></i>
+                            Lihat CV
+                        </a>
+                    </div>
+                @else
+                    <div class="p-4 bg-gray-50 border border-dashed border-gray-300 rounded-xl mb-5 text-sm text-gray-500">
+                        Belum ada dokumen CV yang diunggah.
+                    </div>
+                @endif
+
+                <label class="block text-sm font-semibold text-gray-700 mb-2">
+                    Unggah CV Baru
+                </label>
+                <input type="file"
+                       name="resume_file"
+                       accept=".pdf,application/pdf"
+                       class="w-full border border-gray-200 rounded-xl p-3 text-sm">
+
+                <p class="text-xs text-gray-500 mt-2">
+                    Format PDF. Maksimal ukuran file 10 MB. Kosongkan jika tidak ingin mengganti CV lama.
+                </p>
+            </div>
+        </div>
+
+        {{-- PUBLICATION --}}
+        <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+            <h2 class="font-bold text-gray-800 mb-2">Pengaturan Website Publik</h2>
+            <p class="text-sm text-gray-500 mb-5">
+                Tentukan apakah profil ini dapat dilihat oleh pengunjung website.
+            </p>
+
+            <input type="hidden" name="is_published" value="0">
+
+            <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox"
+                       name="is_published"
+                       value="1"
+                       @checked(old('is_published', $profile?->is_published ?? true))
+                       class="w-5 h-5 mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+
+                <span>
+                    <span class="block font-semibold text-gray-800">
+                        Publikasikan profil
+                    </span>
+                    <span class="block text-sm text-gray-500 mt-1">
+                        Profil dapat ditampilkan pada halaman utama CV Digital.
+                    </span>
+                </span>
+            </label>
+        </div>
+
+        {{-- SAVE BUTTON --}}
+        <div class="flex flex-col sm:flex-row justify-end gap-3">
+            <button type="submit"
+                    class="inline-flex items-center justify-center gap-2 px-7 py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 shadow-sm transition">
+                <i data-lucide="save" class="w-5 h-5"></i>
+                Simpan Perubahan Profil
+            </button>
+        </div>
+
+    </form>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const input = document.getElementById('photo');
+    const preview = document.getElementById('photoPreview');
+    const placeholder = document.getElementById('photoPlaceholder');
+
+    if (input) {
+        input.addEventListener('change', function (event) {
+            const file = event.target.files[0];
+
+            if (!file) return;
+
+            if (file.size > 5 * 1024 * 1024) {
+                alert('Ukuran foto maksimal 5 MB.');
+                input.value = '';
+                return;
+            }
+
+            const reader = new FileReader();
+
+            reader.onload = function (e) {
+                preview.src = e.target.result;
+                preview.classList.remove('hidden');
+
+                if (placeholder) {
+                    placeholder.classList.add('hidden');
+                }
+            };
+
+            reader.readAsDataURL(file);
+        });
+    }
+});
+</script>
+@endsection

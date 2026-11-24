@@ -1,0 +1,82 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Certificate;
+use App\Models\Education;
+use App\Models\Experience;
+use App\Models\Message;
+use App\Models\Profile;
+use App\Models\Project;
+use App\Models\Setting;
+use App\Models\Skill;
+use App\Models\SocialLink;
+use Illuminate\Http\Request;
+
+class HomeController extends Controller
+{
+    /**
+     * Menampilkan halaman utama CV Digital.
+     */
+    public function index()
+    {
+        $profile = Profile::first();
+
+        $educations = Education::where('is_visible', true)
+            ->orderBy('sort_order')
+            ->get();
+
+        $experiences = Experience::where('is_visible', true)
+            ->orderBy('sort_order')
+            ->get();
+
+        $skills = Skill::where('is_visible', true)
+            ->orderBy('sort_order')
+            ->get();
+
+        $certificates = Certificate::where('is_visible', true)
+            ->orderBy('sort_order')
+            ->get();
+
+        $projects = Project::where('is_visible', true)
+            ->orderBy('sort_order')
+            ->get();
+
+        $socialLinks = SocialLink::where('is_visible', true)
+            ->orderBy('sort_order')
+            ->get();
+
+        $settings = Setting::all()->keyBy('key');
+
+        return view('welcome', compact(
+            'profile',
+            'educations',
+            'experiences',
+            'skills',
+            'certificates',
+            'projects',
+            'socialLinks',
+            'settings'
+        ));
+    }
+
+    /**
+     * Menyimpan pesan dari formulir kontak.
+     */
+    public function contact(Request $request)
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['required', 'email', 'max:255'],
+            'subject' => ['nullable', 'string', 'max:255'],
+            'message' => ['required', 'string', 'max:5000'],
+        ]);
+
+        Message::create($data);
+
+        return back()->with(
+            'contact_success',
+            'Pesan berhasil dikirim. Terima kasih!'
+        );
+    }
+}
